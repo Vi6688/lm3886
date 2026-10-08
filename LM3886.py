@@ -1,58 +1,124 @@
 import math
 
-def amplifier_calculations(Pout, RL, Vin=1.0, Rf=100_000,
-                           headroom=4.0, tolerance=0.15, margin=1.1,
-                           fl_audio=20, fh_audio=20_000):
 
-    print("\n=== AUDIO POWER AMPLIFIER CALCULATIONS ===\n")
+def amplifier_calculations(
+    Pout: float,
+    RL: float,
+    Vin: float = 1.0,
+    Rf: float = 100_000,
+    headroom: float = 4.0,
+    tolerance: float = 0.15,
+    margin: float = 1.1,
+    fl_audio: float = 20,
+    fh_audio: float = 20_000,
+    input_impedance: float = 10_000,
+    minimum_gain: float = 10.0,
+) -> dict[str, float | bool | list[str]]:
+    """Calculate first-pass values for a single-supply LM3886 amplifier.
 
-    # Peak output voltage & current
+    Voltages and Vin are RMS unless stated otherwise; resistance is in ohms,
+    power in watts, and frequencies in hertz.
+    """
+    positive_values = {
+        "Pout": Pout,
+        "RL": RL,
+        "Vin": Vin,
+        "Rf": Rf,
+        "margin": margin,
+        "fl_audio": fl_audio,
+        "fh_audio": fh_audio,
+        "input_impedance": input_impedance,
+        "minimum_gain": minimum_gain,
+    }
+    for name, value in positive_values.items():
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be a finite positive number")
+    if not math.isfinite(headroom) or headroom < 0:
+        raise ValueError("headroom must be a finite non-negative number")
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("tolerance must be a finite non-negative number")
+    if fh_audio <= fl_audio:
+        raise ValueError("fh_audio must be greater than fl_audio")
+    if minimum_gain < 10:
+        raise ValueError("minimum_gain must be at least 10 for LM3886 stability")
+
+    # Output is centered at half the single supply, so both half-cycles need
+    # the same output swing plus headroom to a supply rail.
     Vout_peak = math.sqrt(2 * Pout * RL)
     Iout_peak = math.sqrt(2 * Pout / RL)
+    V_supply = 2 * (Vout_peak + headroom) * (1 + tolerance) * margin
+    V_bias = V_supply / 2
 
-    # Max supply voltage
-    V_supply = (Vout_peak + headroom) * (1 + tolerance) * margin
+    required_gain = math.sqrt(Pout * RL) / Vin
+    Av = max(required_gain, minimum_gain)
+    Ri = Rf / (Av - 1)
 
-    # Voltage gain
-    Av = math.sqrt(Pout * RL) / Vin
-
-    # Input resistance (non-inverting)
-    Rin = Rf / (Av - 1)
-
-    # Bandwidth design (5× rule)
+    # Five-times bandwidth margin from the specified audio band edges.
     fl = fl_audio / 5
     fh = fh_audio * 5
-
-    # Gain Bandwidth Product
     GBWP_required = Av * fh
 
-    # Input coupling capacitor
-    Ci = 1 / (2 * math.pi * Rin * fl)
+    Ci = 1 / (2 * math.pi * input_impedance * fl)
+    Cout = 1 / (2 * math.pi * RL * fl)
 
-    # Print results neatly
-    print(f"Output Power               : {Pout:.2f} W")
-    print(f"Load Resistance            : {RL:.2f} Ω\n")
+    warnings = []
+    if not 20 <= V_supply <= 84:
+        warnings.append(
+            "Calculated supply is outside the LM3886 datasheet's 20-84 V "
+            "total-supply operating range."
+        )
+    if GBWP_required > 2_000_000:
+        warnings.append(
+            "Required gain-bandwidth product exceeds the LM3886 minimum "
+            "specified value of 2 MHz."
+        )
+    warnings.append(
+        "Check the datasheet power-dissipation/thermal curves and heatsink; "
+        "the voltage and current estimates do not guarantee the requested "
+        "continuous output power."
+    )
 
-    print(f"Output Voltage (Peak)      : {Vout_peak:.2f} V")
-    print(f"Output Current (Peak)      : {Iout_peak:.2f} A\n")
+    results: dict[str, float | bool | list[str]] = {
+        "output_power_w": Pout,
+        "load_resistance_ohm": RL,
+        "output_voltage_peak_v": Vout_peak,
+        "output_current_peak_a": Iout_peak,
+        "single_supply_voltage_v": V_supply,
+        "midpoint_bias_voltage_v": V_bias,
+        "voltage_gain_v_per_v": Av,
+        "input_sensitivity_v_rms": math.sqrt(Pout * RL) / Av,
+        "feedback_resistor_rf_ohm": Rf,
+        "gain_resistor_ri_ohm": Ri,
+        "input_impedance_ohm": input_impedance,
+        "low_cutoff_hz": fl,
+        "high_cutoff_hz": fh,
+        "minimum_gain_bandwidth_hz": GBWP_required,
+        "input_coupling_capacitance_f": Ci,
+        "output_coupling_capacitance_f": Cout,
+        "output_capacitor_voltage_rating_min_v": V_supply,
+        "supply_within_datasheet_range": 20 <= V_supply <= 84,
+        "gain_bandwidth_within_lm3886_minimum": GBWP_required <= 2_000_000,
+        "warnings": warnings,
+    }
 
-    print(f"Required Supply Voltage    : ±{V_supply:.2f} V\n")
+    print("\n=== SINGLE-SUPPLY LM3886 CALCULATIONS ===\n")
+    print(f"Output power                 : {Pout:.2f} W into {RL:.2f} Ω")
+    print(f"Output voltage (peak)        : {Vout_peak:.2f} V")
+    print(f"Output current (peak)         : {Iout_peak:.2f} A")
+    print(f"Estimated single supply      : {V_supply:.2f} V DC")
+    print(f"Signal/reference midpoint    : {V_bias:.2f} V")
+    print(f"Voltage gain                 : {Av:.2f} V/V")
+    print(f"Gain-setting Rf / Ri         : {Rf / 1000:.2f} kΩ / {Ri / 1000:.2f} kΩ")
+    print(f"Input coupling capacitor     : {Ci * 1e6:.2f} µF minimum")
+    print(f"Speaker coupling capacitor   : {Cout * 1e6:.2f} µF minimum")
+    print(f"Output capacitor rating      : at least {V_supply:.2f} V")
+    print(f"Required gain-bandwidth      : {GBWP_required / 1e6:.2f} MHz")
+    for warning in warnings:
+        print(f"Warning: {warning}")
+    print("\n==========================================\n")
 
-    print(f"Required Voltage Gain      : {Av:.2f} V/V (~{math.ceil(Av)})")
-    print(f"Feedback Resistor (Rf)     : {Rf/1000:.1f} kΩ")
-    print(f"Input Resistance (Rin)     : {Rin/1000:.2f} kΩ\n")
-
-    print("Bandwidth Requirements:")
-    print(f"  Low cutoff frequency     : {fl:.2f} Hz")
-    print(f"  High cutoff frequency    : {fh/1000:.2f} kHz\n")
-
-    print(f"Minimum GBWP Required      : {GBWP_required/1e6:.2f} MHz")
-    print("LM3886 GBWP (min)          : 2.00 MHz\n")
-
-    print(f"Input Coupling Capacitor   : {Ci*1e6:.2f} µF (~4.7 µF standard)")
-
-    print("\n========================================\n")
+    return results
 
 
-# Example usage
-amplifier_calculations(Pout=68, RL=4)
+if __name__ == "__main__":
+    amplifier_calculations(Pout=30, RL=4)
